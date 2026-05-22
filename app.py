@@ -3,19 +3,16 @@
 
 import streamlit as st
 import pandas as pd
-import time
-import requests
 
 from anonimizador import anonimizar_texto, generar_advertencia_habeas_data, resumen_anonimizacion
 from extractor import extraer_citas, agrupar_por_tipo, ETIQUETAS_TIPO
-from verificador import verificar_cita, _crear_sesion
+from verificador import verificar_cita, verificar_todas
 from utils import (
-    extraer_texto, limpiar_texto, citas_a_dataframe,
-    exportar_excel, calcular_estadisticas,
-    ETIQUETAS_ESTADO, ETIQUETAS_TIPO_CORTO,
+    extraer_texto, limpiar_texto, exportar_excel,
+    calcular_estadisticas, ETIQUETAS_TIPO_CORTO,
 )
 
-# ── Página ────────────────────────────────────────────────────────────
+# ── Página ────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Verificador de Citas Jurídicas · Colombia",
     page_icon="⚖️",
@@ -32,13 +29,18 @@ html, body, [class*="css"] { font-family: 'Source Sans 3', sans-serif; }
     padding: 1.8rem 2.2rem 1.4rem; border-radius: 12px;
     margin-bottom: 1.4rem; box-shadow: 0 4px 20px rgba(13,27,42,.35);
 }
-.header-box h1 { font-family:'Playfair Display',serif; color:#e8d9b5; font-size:1.9rem; margin:0 0 .2rem; }
+.header-box h1 { font-family:'Playfair Display',serif; color:#e8d9b5;
+                 font-size:1.9rem; margin:0 0 .2rem; }
 .header-box p  { color:#a8c4e0; font-size:.9rem; margin:0; }
 .badge { display:inline-block; background:#e8f4f8; color:#1b5c7a;
          border:1px solid #a8cfe0; border-radius:20px;
          padding:.15rem .7rem; font-size:.75rem; font-weight:600; margin-top:.4rem; }
 .aviso { background:#fffbf0; border:1px solid #d4a017; border-radius:8px;
          padding:.9rem; font-size:.85rem; color:#5a4a00; margin-bottom:.8rem; }
+.link-box { background:#f0f4f8; border-radius:8px; padding:.7rem 1rem;
+            margin:.3rem 0; font-size:.85rem; }
+.link-box a { color:#1b3a5c; font-weight:600; text-decoration:none; }
+.link-box a:hover { text-decoration:underline; }
 section[data-testid="stSidebar"] { background:#0d1b2a; }
 section[data-testid="stSidebar"] * { color:#d0dde8 !important; }
 </style>
@@ -47,54 +49,46 @@ section[data-testid="stSidebar"] * { color:#d0dde8 !important; }
 st.markdown("""
 <div class="header-box">
   <h1>⚖️ Verificador de Citas Jurídicas Colombianas</h1>
-  <p>Detección y verificación automática de normas, jurisprudencia y doctrina en documentos legales.</p>
+  <p>Detección de normas, jurisprudencia y doctrina · Enlaces directos para verificación manual en SUIN-Juriscol y fuentes oficiales.</p>
   <span class="badge">🤖 IA Responsable · Habeas Data · Uso orientativo</span>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Sidebar ────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Configuración")
     st.markdown("---")
-    st.markdown("### 🔎 Tipos de cita")
-    filtro_normas   = st.checkbox("📜 Normas legales",           value=True)
-    filtro_cc       = st.checkbox("⚖️ Corte Constitucional",     value=True)
-    filtro_csj      = st.checkbox("🏛️ Corte Suprema de Justicia",value=True)
-    filtro_ce       = st.checkbox("🏢 Consejo de Estado",        value=True)
-    filtro_doctrina = st.checkbox("📚 Doctrina (ISBN / DOI)",    value=True)
-
-    st.markdown("---")
-    st.markdown("### 🌐 Fuentes de verificación")
-    f_suin   = st.checkbox("SUIN-Juriscol",       value=True)
-    f_fp     = st.checkbox("Función Pública",      value=True)
-    f_cc     = st.checkbox("Corte Constitucional", value=True)
-    f_csj    = st.checkbox("Corte Suprema",        value=True)
-    f_ce     = st.checkbox("Consejo de Estado",    value=True)
-
-    fuentes_activas = {
-        "suin": f_suin, "funcion_publica": f_fp,
-        "corte_constitucional": f_cc, "corte_suprema": f_csj, "consejo_estado": f_ce,
-    }
+    st.markdown("### 🔎 Tipos de cita a detectar")
+    filtro_normas   = st.checkbox("📜 Normas legales",            value=True)
+    filtro_cc       = st.checkbox("⚖️ Corte Constitucional",      value=True)
+    filtro_csj      = st.checkbox("🏛️ Corte Suprema de Justicia", value=True)
+    filtro_ce       = st.checkbox("🏢 Consejo de Estado",         value=True)
+    filtro_doctrina = st.checkbox("📚 Doctrina (ISBN / DOI)",     value=True)
 
     st.markdown("---")
     st.markdown("### 🔒 Privacidad")
     hacer_anonimizar = st.toggle("Anonimizar datos personales", value=True,
-        help="Elimina nombres, cédulas, teléfonos, etc. (recomendado)")
+        help="Elimina nombres, cédulas, teléfonos, etc. antes del análisis (Ley 1581/2012)")
 
     st.markdown("---")
-    st.caption("Herramienta orientativa. No reemplaza el criterio del profesional jurídico. Ley 1581/2012.")
+    st.info(
+        "ℹ️ **Sobre la verificación**\n\n"
+        "Por restricciones de red en servidores cloud, la app genera **enlaces directos** "
+        "para que usted consulte cada cita en SUIN-Juriscol, Google y las relatorías oficiales. "
+        "Abra el enlace con un clic desde su navegador.",
+        icon=None,
+    )
+    st.caption("Herramienta orientativa. No reemplaza el criterio del profesional jurídico.")
 
-# ── Aviso Habeas Data ──────────────────────────────────────────────────
+# ── Aviso Habeas Data ─────────────────────────────────────────────────────────
 with st.expander("⚖️ Aviso legal — Habeas Data e IA Responsable", expanded=False):
     st.markdown(generar_advertencia_habeas_data())
 st.markdown("---")
 
-# ── Session state ──────────────────────────────────────────────────────
-# Guardamos las citas como lista de dicts (JSON-serializable) para que
-# Streamlit no pierda el estado entre reruns.
+# ── Session state ─────────────────────────────────────────────────────────────
 for key, val in {
-    "citas_dicts": [],          # lista de dicts con todos los campos de Cita
-    "verificacion_completa": False,
+    "citas_dicts":  [],
+    "enlaces_generados": False,
     "nombre_archivo": "",
     "texto_display": "",
     "registro_anon": {},
@@ -102,14 +96,14 @@ for key, val in {
     if key not in st.session_state:
         st.session_state[key] = val
 
-# ── Tabs ───────────────────────────────────────────────────────────────
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📄 Documento", "🔍 Citas detectadas", "✅ Verificación", "📊 Reporte"
+    "📄 Documento", "🔍 Citas detectadas", "🔗 Enlaces de verificación", "📊 Reporte"
 ])
 
-# ════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 # TAB 1 — DOCUMENTO
-# ════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 with tab1:
     st.subheader("Cargar documento jurídico")
     st.caption("Formatos: PDF · DOCX · TXT")
@@ -117,13 +111,13 @@ with tab1:
     archivo = st.file_uploader(
         "Seleccione el documento",
         type=["pdf", "docx", "txt"],
-        help="Procesado solo en memoria. No se almacena ni transmite.",
+        help="El archivo se procesa solo en memoria. No se almacena ni transmite.",
     )
 
     if archivo is not None:
         with st.spinner("📖 Extrayendo y procesando el documento…"):
             try:
-                raw = archivo.read()
+                raw   = archivo.read()
                 texto = limpiar_texto(extraer_texto(raw, archivo.name))
                 st.session_state.nombre_archivo = archivo.name
 
@@ -135,7 +129,6 @@ with tab1:
 
                 st.session_state.texto_display = texto[:3000]
 
-                # Filtros activos
                 tipos_ok = []
                 if filtro_normas:   tipos_ok.append("norma")
                 if filtro_cc:       tipos_ok.append("corte_constitucional")
@@ -145,7 +138,6 @@ with tab1:
 
                 citas = [c for c in extraer_citas(texto) if c.tipo in tipos_ok]
 
-                # Convertir a dicts para guardar en session_state de forma segura
                 st.session_state.citas_dicts = [
                     {
                         "tipo": c.tipo, "subtipo": c.subtipo,
@@ -156,13 +148,13 @@ with tab1:
                     }
                     for c in citas
                 ]
-                st.session_state.verificacion_completa = False
+                st.session_state.enlaces_generados = False
 
                 st.success(
                     f"✅ **{archivo.name}** cargado — "
-                    f"{len(texto):,} caracteres · **{len(citas)}** cita(s) detectada(s)"
+                    f"{len(texto):,} caracteres · "
+                    f"**{len(citas)}** cita(s) detectada(s)"
                 )
-
             except Exception as e:
                 st.error(f"❌ Error al procesar el documento: {e}")
 
@@ -171,15 +163,14 @@ with tab1:
             st.info(resumen_anonimizacion(st.session_state.registro_anon))
         elif hacer_anonimizar:
             st.success("✅ No se detectaron datos personales identificables.")
-
         with st.expander("Ver primeros 3.000 caracteres del texto procesado"):
             st.text(st.session_state.texto_display)
     else:
         st.info("👆 Cargue un documento para comenzar el análisis.")
 
-# ════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 # TAB 2 — CITAS DETECTADAS
-# ════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 with tab2:
     citas_dicts = st.session_state.citas_dicts
     if not citas_dicts:
@@ -187,7 +178,6 @@ with tab2:
     else:
         st.subheader(f"Citas detectadas: {len(citas_dicts)}")
 
-        # Conteo por tipo
         conteo = {}
         for d in citas_dicts:
             conteo[d["tipo"]] = conteo.get(d["tipo"], 0) + 1
@@ -197,17 +187,15 @@ with tab2:
             ("norma","📜"),("corte_constitucional","⚖️"),
             ("corte_suprema","🏛️"),("consejo_estado","🏢"),("doctrina","📚")
         ]):
-            col.metric(f"{icono} {ETIQUETAS_TIPO_CORTO.get(tipo,tipo)}", conteo.get(tipo,0))
+            col.metric(f"{icono} {ETIQUETAS_TIPO_CORTO.get(tipo, tipo)}", conteo.get(tipo, 0))
 
         st.markdown("---")
-
-        # Tabla por tipo
         grupos = {}
         for d in citas_dicts:
             grupos.setdefault(d["tipo"], []).append(d)
 
         for tipo, lista in grupos.items():
-            with st.expander(f"{ETIQUETAS_TIPO.get(tipo,tipo)} — {len(lista)} cita(s)", expanded=True):
+            with st.expander(f"{ETIQUETAS_TIPO.get(tipo, tipo)} — {len(lista)} cita(s)", expanded=True):
                 st.dataframe(
                     pd.DataFrame([{
                         "Subtipo": d["subtipo"],
@@ -217,186 +205,204 @@ with tab2:
                     use_container_width=True, hide_index=True,
                 )
 
-# ════════════════════════════════════════════
-# TAB 3 — VERIFICACIÓN
-# ════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+# TAB 3 — ENLACES DE VERIFICACIÓN
+# ══════════════════════════════════════════════════════
 with tab3:
     citas_dicts = st.session_state.citas_dicts
 
     if not citas_dicts:
-        st.info("Cargue un documento y detecte citas antes de verificar.")
+        st.info("Cargue un documento en **📄 Documento** para generar los enlaces.")
     else:
-        st.subheader("Verificación en fuentes oficiales")
+        st.subheader("🔗 Enlaces de verificación manual")
+        st.markdown(
+            "La app genera enlaces directos a **SUIN-Juriscol** (via Google), "
+            "las **relatorías oficiales** de cada corte y buscadores generales. "
+            "Haga clic en cualquier enlace para abrirlo en su navegador y verificar la cita."
+        )
 
-        fuentes_sel = [k for k, v in fuentes_activas.items() if v]
-        if not fuentes_sel:
-            st.error("Active al menos una fuente de verificación en la barra lateral.")
-        else:
-            total_citas = len(citas_dicts)
-            ya_completa = st.session_state.verificacion_completa
+        ya_generados = st.session_state.enlaces_generados
 
-            col_a, col_b = st.columns([1, 4])
-            with col_a:
-                iniciar = st.button(
-                    "🚀 Iniciar verificación", type="primary",
-                    disabled=ya_completa,
+        col_a, col_b = st.columns([1, 4])
+        with col_a:
+            generar = st.button(
+                "🔗 Generar enlaces",
+                type="primary",
+                disabled=ya_generados,
+            )
+        with col_b:
+            if ya_generados:
+                st.success("✅ Enlaces generados — consulte cada cita en su navegador.")
+            if ya_generados and st.button("🔄 Regenerar"):
+                for d in st.session_state.citas_dicts:
+                    d["estado"] = "pendiente"; d["fuente"] = ""; d["enlace"] = ""
+                st.session_state.enlaces_generados = False
+                st.rerun()
+
+        # ── Proceso de generación (instantáneo, sin red) ──────────────────────
+        if generar:
+            from extractor import Cita
+            barra = st.progress(0, text="Generando enlaces…")
+            total = len(st.session_state.citas_dicts)
+
+            for i, d in enumerate(st.session_state.citas_dicts):
+                barra.progress((i + 1) / total, text=f"Procesando {i+1}/{total}: {d['referencia']}")
+                cita_obj = Cita(
+                    tipo=d["tipo"], subtipo=d["subtipo"],
+                    texto_original=d["texto_original"],
+                    referencia=d["referencia"],
                 )
-            with col_b:
-                if ya_completa:
-                    st.success("✅ Verificación completada — vea el **📊 Reporte**.")
-                if ya_completa and st.button("🔄 Volver a verificar"):
-                    for d in st.session_state.citas_dicts:
-                        d["estado"] = "pendiente"; d["fuente"] = ""; d["enlace"] = ""
-                    st.session_state.verificacion_completa = False
-                    st.rerun()
+                verificar_cita(cita_obj)
+                d["estado"] = cita_obj.estado
+                d["fuente"] = cita_obj.fuente
+                d["enlace"] = cita_obj.enlace
 
-            # ── Proceso principal — SIN st.rerun() dentro del loop ──
-            if iniciar:
-                barra      = st.progress(0, text="Iniciando…")
-                estado_txt = st.empty()
-                sesion     = _crear_sesion()
-                errores    = []
+            barra.progress(1.0, text="✅ Completado")
+            st.session_state.enlaces_generados = True
 
-                for i, d in enumerate(st.session_state.citas_dicts):
-                    pct = i / total_citas
-                    barra.progress(pct, text=f"Verificando {i+1}/{total_citas}: {d['referencia']}")
-                    estado_txt.info(f"🔍 **{d['referencia']}** · {d['tipo'].replace('_',' ')}")
+        # ── Mostrar enlaces por cita ───────────────────────────────────────────
+        con_enlaces = [d for d in st.session_state.citas_dicts if d["estado"] == "generado"]
 
-                    # Reconstruir objeto Cita desde el dict
-                    from extractor import Cita
-                    cita_obj = Cita(
-                        tipo=d["tipo"], subtipo=d["subtipo"],
-                        texto_original=d["texto_original"],
-                        referencia=d["referencia"],
-                    )
-
-                    try:
-                        verificar_cita(cita_obj, fuentes_activas, sesion)
-                        d["estado"] = cita_obj.estado
-                        d["fuente"] = cita_obj.fuente
-                        d["enlace"] = cita_obj.enlace
-                    except Exception as e:
-                        d["estado"] = "no_verificable"
-                        d["fuente"] = f"Error: {str(e)[:80]}"
-                        d["enlace"] = ""
-                        errores.append(d["referencia"])
-
-                barra.progress(1.0, text="✅ Completado")
-                estado_txt.empty()
-
-                # Marcar como completo — SIN rerun para no perder el estado
-                st.session_state.verificacion_completa = True
-
-                if errores:
-                    st.warning(f"⚠️ {len(errores)} cita(s) con error de red — quedan como 'No verificable'.")
-                else:
-                    st.success("✅ Todas las citas fueron consultadas. Vea el **📊 Reporte**.")
-
-        # ── Tabla de resultados (visible si hay estados procesados) ──
-        con_estado = [d for d in st.session_state.citas_dicts if d["estado"] != "pendiente"]
-        if con_estado:
-            from extractor import Cita as C2
-            citas_obj = [
-                C2(tipo=d["tipo"], subtipo=d["subtipo"],
-                   texto_original=d["texto_original"], referencia=d["referencia"],
-                   estado=d["estado"], fuente=d["fuente"], enlace=d["enlace"])
-                for d in st.session_state.citas_dicts
-            ]
-            stats = calcular_estadisticas(citas_obj)
-
+        if con_enlaces:
             st.markdown("---")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total",             stats["total"])
-            c2.metric("✅ Encontradas",    stats["encontradas"])
-            c3.metric("❌ No encontradas", stats["no_encontradas"])
-            c4.metric("⚠️ No verificables",stats["no_verificables"])
 
-            df = citas_a_dataframe(citas_obj)
-            estados_disp = ["Todos"] + sorted({
-                ETIQUETAS_ESTADO.get(d["estado"], d["estado"]) for d in con_estado
-            })
-            filtro_est = st.selectbox("Filtrar por estado:", estados_disp)
-            df_m = df if filtro_est == "Todos" else df[df["Estado"] == filtro_est]
+            # Filtro por tipo
+            tipos_presentes = sorted({d["tipo"] for d in con_enlaces})
+            opciones_filtro = ["Todos los tipos"] + [
+                ETIQUETAS_TIPO_CORTO.get(t, t) for t in tipos_presentes
+            ]
+            filtro_tipo = st.selectbox("Filtrar por tipo:", opciones_filtro)
 
-            def colorear(val):
-                if "✅" in str(val): return "background-color:#c6efce;color:#1a7a4a;font-weight:600"
-                if "❌" in str(val): return "background-color:#ffc7ce;color:#c0392b;font-weight:600"
-                if "⚠️" in str(val): return "background-color:#ffeb9c;color:#7f5a00;font-weight:600"
-                return ""
+            if filtro_tipo != "Todos los tipos":
+                tipo_filtrado = next(
+                    (t for t in tipos_presentes if ETIQUETAS_TIPO_CORTO.get(t, t) == filtro_tipo),
+                    None
+                )
+                mostrar = [d for d in con_enlaces if d["tipo"] == tipo_filtrado]
+            else:
+                mostrar = con_enlaces
+
+            st.caption(f"Mostrando {len(mostrar)} cita(s)")
+
+            for d in mostrar:
+                icono = {
+                    "norma": "📜", "corte_constitucional": "⚖️",
+                    "corte_suprema": "🏛️", "consejo_estado": "🏢", "doctrina": "📚"
+                }.get(d["tipo"], "📄")
+
+                with st.expander(
+                    f"{icono} **{d['referencia']}** · {ETIQUETAS_TIPO_CORTO.get(d['tipo'], d['tipo'])} · {d['subtipo']}",
+                    expanded=False,
+                ):
+                    st.caption(f"Texto original en el documento: *{d['texto_original']}*")
+                    st.markdown("**🔗 Enlaces para verificar esta cita:**")
+
+                    # Parsear los pares "Etiqueta: URL" del campo fuente
+                    pares = d["fuente"].split(" | ")
+                    for par in pares:
+                        if ": http" in par:
+                            idx   = par.index(": http")
+                            label = par[:idx].strip()
+                            url   = par[idx+2:].strip()
+                            st.markdown(
+                                f'<div class="link-box">'
+                                f'{label}: <a href="{url}" target="_blank">{url}</a>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+
+            # ── Tabla resumen compacta ────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("### Tabla resumen")
+            st.caption("El enlace principal de cada fila abre la búsqueda en SUIN-Juriscol via Google.")
+
+            df = pd.DataFrame([{
+                "Tipo":        ETIQUETAS_TIPO_CORTO.get(d["tipo"], d["tipo"]),
+                "Subtipo":     d["subtipo"],
+                "Referencia":  d["referencia"],
+                "Enlace SUIN (Google)": d["enlace"],
+            } for d in mostrar])
 
             st.dataframe(
-                df_m.style.map(colorear, subset=["Estado"]),
-                use_container_width=True, hide_index=True,
-                column_config={"Enlace": st.column_config.LinkColumn("Enlace", display_text="🔗 Abrir")},
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Enlace SUIN (Google)": st.column_config.LinkColumn(
+                        "Enlace SUIN (Google)",
+                        display_text="🔍 Buscar en SUIN",
+                    ),
+                },
             )
 
-# ════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 # TAB 4 — REPORTE
-# ════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 with tab4:
-    citas_dicts    = st.session_state.citas_dicts
-    con_estado     = [d for d in citas_dicts if d["estado"] != "pendiente"]
+    citas_dicts  = st.session_state.citas_dicts
+    con_enlaces  = [d for d in citas_dicts if d["estado"] == "generado"]
 
     if not citas_dicts:
-        st.info("Cargue y analice un documento para generar el reporte.")
-    elif not con_estado:
-        st.info("Complete la verificación en **✅ Verificación** para generar el reporte.")
+        st.info("Cargue un documento para generar el reporte.")
+    elif not con_enlaces:
+        st.info("Genere los enlaces en **🔗 Enlaces de verificación** para activar el reporte.")
     else:
-        from extractor import Cita as C3
+        from extractor import Cita as C
         citas_obj = [
-            C3(tipo=d["tipo"], subtipo=d["subtipo"],
-               texto_original=d["texto_original"], referencia=d["referencia"],
-               estado=d["estado"], fuente=d["fuente"], enlace=d["enlace"])
+            C(tipo=d["tipo"], subtipo=d["subtipo"],
+              texto_original=d["texto_original"], referencia=d["referencia"],
+              estado=d["estado"], fuente=d["fuente"], enlace=d["enlace"])
             for d in citas_dicts
         ]
-        stats = calcular_estadisticas(citas_obj)
 
+        total = len(citas_obj)
         st.subheader("📊 Resumen del análisis")
 
-        col1, col2, col3 = st.columns(3)
+        # Distribución por tipo
+        conteo_tipo = {}
+        for d in citas_dicts:
+            etiq = ETIQUETAS_TIPO_CORTO.get(d["tipo"], d["tipo"])
+            conteo_tipo[etiq] = conteo_tipo.get(etiq, 0) + 1
+
+        col1, col2 = st.columns([1, 2])
         with col1:
-            st.markdown(f"""<div style="background:#eafaf1;border-left:5px solid #1a7a4a;
-                border-radius:8px;padding:1rem .9rem;margin-bottom:.6rem">
-                <strong>✅ Tasa de validez</strong><br>
-                <span style="font-size:2rem;color:#1a7a4a;font-weight:700">{stats['pct_validas']}%</span><br>
-                <small>{stats['encontradas']} de {stats['total']} encontradas</small>
-            </div>""", unsafe_allow_html=True)
+            st.metric("Total de citas detectadas", total)
+            for etiq, cnt in conteo_tipo.items():
+                st.metric(etiq, cnt)
         with col2:
-            st.markdown(f"""<div style="background:#fdedec;border-left:5px solid #c0392b;
-                border-radius:8px;padding:1rem .9rem;margin-bottom:.6rem">
-                <strong>❌ No encontradas</strong><br>
-                <span style="font-size:2rem;color:#c0392b;font-weight:700">{stats['no_encontradas']}</span><br>
-                <small>Requieren revisión manual</small>
-            </div>""", unsafe_allow_html=True)
-        with col3:
-            st.markdown(f"""<div style="background:#fef9e7;border-left:5px solid #d4a017;
-                border-radius:8px;padding:1rem .9rem;margin-bottom:.6rem">
-                <strong>⚠️ No verificables</strong><br>
-                <span style="font-size:2rem;color:#b7860b;font-weight:700">{stats['no_verificables']}</span><br>
-                <small>Error de red o sin fuente</small>
-            </div>""", unsafe_allow_html=True)
+            if conteo_tipo:
+                df_tipos = pd.DataFrame(
+                    list(conteo_tipo.items()), columns=["Tipo", "Total"]
+                )
+                st.bar_chart(df_tipos.set_index("Tipo"))
 
         st.markdown("---")
 
-        if stats["por_tipo"]:
-            st.markdown("### Distribución por tipo de cita")
-            df_tipos = pd.DataFrame([
-                {"Tipo": t, "Total": datos.get("total", 0)}
-                for t, datos in stats["por_tipo"].items()
-            ])
-            st.bar_chart(df_tipos.set_index("Tipo"))
+        # Aviso IA responsable
+        st.markdown("""
+        <div class="aviso">
+        ⚠️ <strong>Aviso de IA Responsable</strong>: Este reporte lista las citas detectadas
+        automáticamente y los enlaces generados para su verificación manual. La detección
+        puede tener falsos positivos o negativos según la redacción del documento.
+        <strong>Toda cita debe ser confirmada por el profesional jurídico responsable</strong>
+        antes de usarse en documentos oficiales. El sistema no toma decisiones jurídicas autónomas.
+        </div>
+        """, unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("""<div class="aviso">
-            ⚠️ <strong>Aviso de IA Responsable</strong>: Este reporte es orientativo.
-            La verificación automática puede presentar falsos positivos/negativos.
-            <strong>Toda cita debe ser confirmada por el profesional jurídico</strong>
-            antes de usarse en documentos oficiales. El sistema no toma decisiones autónomas.
-        </div>""", unsafe_allow_html=True)
-
-        # Botón de descarga Excel
+        # Descarga Excel
         try:
-            bytes_xl = exportar_excel(citas_obj, st.session_state.nombre_archivo)
+            # Para exportar, adaptar estados "generado" → "no_verificable" en Excel
+            # (para que la lógica de colores de exportar_excel funcione)
+            from extractor import Cita as CE
+            citas_export = [
+                CE(tipo=d["tipo"], subtipo=d["subtipo"],
+                   texto_original=d["texto_original"], referencia=d["referencia"],
+                   estado="no_verificable",   # color neutro en Excel
+                   fuente="Ver enlaces en la app",
+                   enlace=d["enlace"])
+                for d in citas_dicts
+            ]
+            bytes_xl = exportar_excel(citas_export, st.session_state.nombre_archivo)
             nombre_base = st.session_state.nombre_archivo.rsplit(".", 1)[0]
             st.download_button(
                 label="📥 Descargar reporte en Excel (.xlsx)",
@@ -408,18 +414,28 @@ with tab4:
         except Exception as e:
             st.error(f"Error al generar el Excel: {e}")
 
-        # Tabla final completa
-        st.markdown("### Tabla completa de resultados")
-        df_final = citas_a_dataframe(citas_obj)
+        # Tabla completa con todos los enlaces
+        st.markdown("### Tabla completa de citas y enlaces")
+        filas = []
+        for d in citas_dicts:
+            # Extraer primer enlace real (SUIN Google)
+            enlace_principal = d.get("enlace", "")
+            filas.append({
+                "Tipo":       ETIQUETAS_TIPO_CORTO.get(d["tipo"], d["tipo"]),
+                "Subtipo":    d["subtipo"],
+                "Referencia": d["referencia"],
+                "Enlace SUIN (Google)": enlace_principal,
+            })
 
-        def colorear2(val):
-            if "✅" in str(val): return "background-color:#c6efce;color:#1a7a4a;font-weight:600"
-            if "❌" in str(val): return "background-color:#ffc7ce;color:#c0392b;font-weight:600"
-            if "⚠️" in str(val): return "background-color:#ffeb9c;color:#7f5a00;font-weight:600"
-            return ""
-
+        df_final = pd.DataFrame(filas)
         st.dataframe(
-            df_final.style.map(colorear2, subset=["Estado"]),
-            use_container_width=True, hide_index=True,
-            column_config={"Enlace": st.column_config.LinkColumn("Enlace", display_text="🔗 Abrir")},
+            df_final,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Enlace SUIN (Google)": st.column_config.LinkColumn(
+                    "Enlace SUIN (Google)",
+                    display_text="🔍 Buscar en SUIN",
+                ),
+            },
         )
