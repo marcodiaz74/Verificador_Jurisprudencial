@@ -1,484 +1,303 @@
 # verificador.py
-# Verificación de providencias judiciales colombianas.
+# Verificación de citas jurídicas colombianas.
 #
-# ENFOQUE REAL:
-#   El buscador de SUIN-Juriscol usa JavaScript/AJAX y no es accesible
-#   directamente con GET params simples. El método que SÍ funciona es:
+# ENFOQUE: generación de enlaces de búsqueda manual.
 #
-#   1. Buscar en Bing con: site:suin-juriscol.gov.co + referencia
-#      Los resultados apuntan directo a viewDocument.asp?id=XXXXX (URLs públicas y funcionales)
-#   2. Validar que la URL encontrada sea del tipo correcto (corporación correcta)
-#   3. Si Bing falla → fallback a la URL canónica conocida de cada corte
+# Diagnóstico confirmado: los servidores cloud (Streamlit Community Cloud)
+# tienen bloqueado el acceso a sitios gubernamentales colombianos y a motores
+# de búsqueda. Por tanto, la verificación automática (HTTP scraping) no es
+# posible desde ese entorno.
 #
-#   URLs canónicas de fallback (siempre funcionales para mostrar al usuario):
-#     CC  → https://www.corteconstitucional.gov.co/relatoria/YYYY/TIPO-NUM.htm
-#     CSJ → https://cortesuprema.gov.co/corte/index.php/relatoria/
-#     CE  → https://www.consejodeestado.gov.co/busquedas/buscador-jurisprudencia/
-#     SUIN búsqueda → https://www.suin-juriscol.gov.co/jurisprudencia/jurisprudencia.html
+# Solución implementada:
+#   Para cada cita se generan TRES enlaces directos y funcionales que el
+#   usuario puede abrir con un clic desde su navegador:
+#
+#   1. SUIN-Juriscol  → búsqueda en Google con site:suin-juriscol.gov.co
+#   2. Fuente oficial → URL directa de la relatoría / buscador de cada corte
+#   3. Google Scholar → búsqueda académica como respaldo
+#
+#   El campo `estado` se marca siempre como "generado" para distinguirlo
+#   de una verificación automática real. El campo `enlace` contiene el
+#   enlace principal (SUIN via Google), y el campo `fuente` describe
+#   todos los enlaces disponibles separados por " | ".
+#
+# El procesamiento es 100% local (sin peticiones HTTP), por lo que
+# funciona en cualquier entorno incluyendo Streamlit Cloud.
 
 import re
-import time
-import urllib3
-import requests
 from urllib.parse import quote_plus
-from bs4 import BeautifulSoup
 from extractor import Cita
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTRUCCIÓN DE ENLACES
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── Constantes ────────────────────────────────────────────────────────────────
-TIMEOUT = 12
-DELAY   = 1.0
-
-BASE_SUIN    = "https://www.suin-juriscol.gov.co"
-URL_SUIN_JUR = f"{BASE_SUIN}/jurisprudencia/jurisprudencia.html"
-
-# URLs canónicas de cada corte (fallback siempre funcional)
-URL_CC_RELATORIA  = "https://www.corteconstitucional.gov.co/relatoria/"
-URL_CSJ_RELATORIA = "https://cortesuprema.gov.co/corte/index.php/relatoria/"
-URL_CE_BUSCADOR   = "https://www.consejodeestado.gov.co/busquedas/buscador-jurisprudencia/"
-
-CABECERAS_BING = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "es-CO,es;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://www.bing.com/",
-}
-
-_R = tuple[str, str, str]   # (estado, fuente, enlace)
+def _google_suin(termino: str) -> str:
+    """Google con site:suin-juriscol.gov.co — devuelve resultados directos de SUIN."""
+    q = f'site:suin-juriscol.gov.co "{termino}"'
+    return f"https://www.google.com/search?q={quote_plus(q)}"
 
 
-# ── Sesión ────────────────────────────────────────────────────────────────────
+def _bing_suin(termino: str) -> str:
+    """Bing con site:suin-juriscol.gov.co — alternativa a Google."""
+    q = f'site:suin-juriscol.gov.co "{termino}"'
+    return f"https://www.bing.com/search?q={quote_plus(q)}"
 
-def _crear_sesion() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(CABECERAS_BING)
-    return s
+
+def _google_general(termino: str) -> str:
+    """Búsqueda general en Google sin restricción de sitio."""
+    return f"https://www.google.com/search?q={quote_plus(termino)}"
+
+
+def _google_scholar(termino: str) -> str:
+    """Google Scholar — útil para doctrina y referencias académicas."""
+    return f"https://scholar.google.com/scholar?q={quote_plus(termino)}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NÚCLEO: buscar en Bing con site:suin-juriscol.gov.co
+# ENLACES POR TIPO DE CORTE / NORMA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _buscar_bing_suin(termino: str, sesion: requests.Session) -> str | None:
+def _enlaces_corte_constitucional(referencia: str) -> dict:
     """
-    Hace una búsqueda en Bing: site:suin-juriscol.gov.co <termino>
-    Devuelve la primera URL de viewDocument.asp?id= encontrada, o None.
+    Genera enlaces para providencias de la Corte Constitucional.
+    Ejemplo: T-123/2020, C-456/18, SU-789/2021, A-045/2019
     """
-    query = f'site:suin-juriscol.gov.co "{termino}"'
-    url_bing = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=es-CO"
-
-    try:
-        resp = sesion.get(url_bing, timeout=TIMEOUT)
-        if resp.status_code != 200:
-            return None
-
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # Bing devuelve los resultados en <li class="b_algo"> → <h2> → <a href>
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            # Solo aceptar URLs directas de viewDocument en SUIN
-            if (
-                "suin-juriscol.gov.co/viewDocument.asp" in href
-                and "id=" in href
-            ):
-                return href
-
-        return None
-
-    except Exception:
-        return None
-
-
-def _buscar_bing_suin_sin_comillas(termino: str, sesion: requests.Session) -> str | None:
-    """Segunda pasada sin comillas — captura variantes de escritura."""
-    query = f"site:suin-juriscol.gov.co {termino}"
-    url_bing = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=es-CO"
-    try:
-        resp = sesion.get(url_bing, timeout=TIMEOUT)
-        if resp.status_code != 200:
-            return None
-        soup = BeautifulSoup(resp.text, "lxml")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "suin-juriscol.gov.co/viewDocument.asp" in href and "id=" in href:
-                return href
-        return None
-    except Exception:
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CORTE CONSTITUCIONAL
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _verificar_corte_constitucional(referencia: str, sesion: requests.Session) -> _R:
-    """
-    Verifica providencias de la Corte Constitucional.
-    Busca en SUIN via Bing. Fallback: URL directa de relatoría CC.
-    Tipos soportados: T-, C-, SU-, A-, D-
-    """
-    FUENTE_SUIN = "SUIN-Juriscol · Corte Constitucional"
-    FUENTE_CC   = "Relatoría Corte Constitucional"
-
-    # Normalizar referencia: "T-123/2020" o "C-456/18"
+    # Normalizar año
     m = re.match(r"([A-Z]+)[\-–](\d{1,4})(?:[/\-](\d{2,4}))?", referencia.strip())
-    if not m:
-        return "no_verificable", FUENTE_SUIN, URL_SUIN_JUR
-
-    tipo, numero, anio_raw = m.groups()
+    tipo, numero, anio_raw = (m.groups() if m else ("", referencia, ""))
     anio = ""
     if anio_raw:
-        if len(anio_raw) == 2:
-            anio = ("20" if int(anio_raw) <= 30 else "19") + anio_raw
+        if len(str(anio_raw)) == 2:
+            anio = ("20" if int(anio_raw) <= 30 else "19") + str(anio_raw)
         else:
-            anio = anio_raw
+            anio = str(anio_raw)
 
-    identificador = f"{tipo}-{numero}"
+    identificador = f"{tipo}-{numero}" if tipo else referencia
 
-    # ── Capa 1: Bing con identificador completo + año ─────────────────────────
-    termino1 = f"{identificador}/{anio}" if anio else identificador
-    url = _buscar_bing_suin(termino1, sesion)
-    if url:
-        return "encontrada", FUENTE_SUIN, url
-
-    # ── Capa 2: Bing solo con identificador ──────────────────────────────────
-    time.sleep(DELAY)
-    url = _buscar_bing_suin(identificador, sesion)
-    if url:
-        return "encontrada", FUENTE_SUIN, url
-
-    # ── Capa 3: Bing sin comillas ─────────────────────────────────────────────
-    time.sleep(DELAY)
-    url = _buscar_bing_suin_sin_comillas(termino1, sesion)
-    if url:
-        return "encontrada", FUENTE_SUIN, url
-
-    # ── Capa 4: URL directa de la relatoría de la CC ─────────────────────────
-    if anio:
-        url_directa = f"{URL_CC_RELATORIA}{anio}/{tipo}-{numero}.htm"
-        try:
-            time.sleep(DELAY)
-            r = sesion.get(url_directa, timeout=TIMEOUT, allow_redirects=True)
-            if r.status_code == 200 and len(r.text) > 500:
-                return "encontrada", FUENTE_CC, url_directa
-        except Exception:
-            pass
-
-    # No encontrada — enlace útil para búsqueda manual en SUIN
-    url_manual = (
-        f"https://www.bing.com/search?q="
-        f"{quote_plus('site:suin-juriscol.gov.co ' + termino1)}"
+    # URL directa de relatoría (formato conocido de la CC)
+    url_relatoria = (
+        f"https://www.corteconstitucional.gov.co/relatoria/{anio}/{tipo}-{numero}.htm"
+        if anio else
+        f"https://www.corteconstitucional.gov.co/relatoria/"
     )
-    return "no_encontrada", FUENTE_SUIN, url_manual
+
+    # Término de búsqueda para SUIN
+    termino_suin   = f"{identificador}/{anio}" if anio else identificador
+    termino_google = f'Corte Constitucional Colombia sentencia "{identificador}" {anio}'.strip()
+
+    return {
+        "suin_google":    _google_suin(termino_suin),
+        "suin_bing":      _bing_suin(termino_suin),
+        "relatoria_cc":   url_relatoria,
+        "google_general": _google_general(termino_google),
+    }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CORTE SUPREMA DE JUSTICIA
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _normalizar_ref_csj(referencia: str) -> list[str]:
+def _enlaces_corte_suprema(referencia: str) -> dict:
     """
-    Genera variantes de búsqueda para una referencia de la CSJ.
-    SC1234-2021 → ["SC1234-2021", "SC 1234-2021", "1234-2021", "1234"]
-    SL5678-2019 → ["SL5678-2019", "5678-2019", "5678"]
-    Rad. 45678  → ["45678"]
+    Genera enlaces para sentencias de la Corte Suprema de Justicia.
+    Ejemplo: SC1234-2021, SL5678-2019, SP9012-2020, Rad. 45678
     """
     ref = referencia.strip().replace("–", "-").replace("—", "-")
-    variantes = [ref]
 
-    # Formato SC/SL/SP NNNN-YYYY
+    # Extraer sala y número
     m = re.match(r"(SC|SL|SP)\s*(\d+)[-–](\d{4})", ref, re.IGNORECASE)
     if m:
         sala, num, anio = m.groups()
-        variantes += [
-            f"{sala}{num}-{anio}",
-            f"{sala} {num}-{anio}",
-            f"{num}-{anio}",
-            num,
-        ]
+        termino_suin   = f"{sala}{num}-{anio}"
+        termino_google = f'Corte Suprema de Justicia Colombia "{sala}{num}-{anio}"'
     else:
-        # Sólo número
         m2 = re.search(r"(\d{4,})", ref)
-        if m2:
-            variantes.append(m2.group(1))
+        num = m2.group(1) if m2 else ref
+        termino_suin   = num
+        termino_google = f'Corte Suprema de Justicia Colombia "{ref}"'
 
-    # Eliminar duplicados manteniendo orden
-    seen, result = set(), []
-    for v in variantes:
-        if v not in seen:
-            seen.add(v)
-            result.append(v)
-    return result
+    return {
+        "suin_google":    _google_suin(termino_suin),
+        "suin_bing":      _bing_suin(termino_suin),
+        "relatoria_csj":  "https://cortesuprema.gov.co/corte/index.php/relatoria/",
+        "google_general": _google_general(termino_google),
+    }
 
 
-def _verificar_corte_suprema(referencia: str, sesion: requests.Session) -> _R:
+def _enlaces_consejo_estado(referencia: str) -> dict:
     """
-    Verifica sentencias de la Corte Suprema de Justicia en SUIN via Bing.
-    Fallback: relatoría propia de la CSJ.
-    """
-    FUENTE_SUIN = "SUIN-Juriscol · Corte Suprema de Justicia"
-    FUENTE_CSJ  = "Relatoría Corte Suprema de Justicia"
-
-    variantes = _normalizar_ref_csj(referencia)
-
-    for i, termino in enumerate(variantes):
-        if i > 0:
-            time.sleep(DELAY)
-        url = _buscar_bing_suin(termino, sesion)
-        if url:
-            return "encontrada", FUENTE_SUIN, url
-
-    # Intentar sin comillas con la variante principal
-    time.sleep(DELAY)
-    url = _buscar_bing_suin_sin_comillas(variantes[0], sesion)
-    if url:
-        return "encontrada", FUENTE_SUIN, url
-
-    url_manual = (
-        f"https://www.bing.com/search?q="
-        f"{quote_plus('site:suin-juriscol.gov.co ' + variantes[0])}"
-    )
-    return "no_encontrada", FUENTE_SUIN, url_manual
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSEJO DE ESTADO
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _normalizar_radicado_ce(referencia: str) -> list[str]:
-    """
-    Genera variantes del radicado del CE para búsqueda.
-    '11001-03-24-000-2019-00319-00'
-        → ['11001-03-24-000-2019-00319-00', '11001032400020190031900', '47685']
-    'Exp. 47685' → ['47685']
+    Genera enlaces para providencias del Consejo de Estado.
+    Ejemplo: 11001-03-24-000-2019-00319-00, Exp. 47685
     """
     ref = re.sub(
-        r"(?:Exp(?:ediente)?|Rad(?:icado)?)[.\s]*", "", referencia, flags=re.IGNORECASE
+        r"(?:Exp(?:ediente)?|Rad(?:icado)?)[.\s]*", "",
+        referencia, flags=re.IGNORECASE
     ).strip()
 
-    variantes = [ref]
+    # Versión con guiones (como aparece en los documentos)
+    ref_guiones = ref.replace("–", "-").replace("—", "-")
 
-    # Radicado largo con guiones
-    if re.search(r"\d{5}[-–]\d{2}[-–]\d{2}[-–]\d{3}[-–]\d{4}", ref):
-        sin_guiones = re.sub(r"[-–\s]", "", ref)
-        if sin_guiones not in variantes:
-            variantes.append(sin_guiones)
+    # Versión sin guiones (como la indexa SUIN)
+    ref_sin_guiones = re.sub(r"[-–\s]", "", ref_guiones)
+    if not ref_sin_guiones.isdigit():
+        ref_sin_guiones = ref_guiones
 
-    # Extraer número interno (ej. 47685 entre paréntesis)
-    m_interno = re.search(r"\((\d{4,6})\)", referencia)
-    if m_interno and m_interno.group(1) not in variantes:
-        variantes.append(m_interno.group(1))
+    termino_suin   = ref_guiones
+    termino_google = f'Consejo de Estado Colombia "{ref_guiones}"'
 
-    seen, result = set(), []
-    for v in variantes:
-        if v and v not in seen:
-            seen.add(v)
-            result.append(v)
-    return result
+    return {
+        "suin_google":    _google_suin(termino_suin),
+        "suin_bing":      _bing_suin(termino_suin),
+        "suin_num":       _google_suin(ref_sin_guiones) if ref_sin_guiones != ref_guiones else None,
+        "buscador_ce":    "https://www.consejodeestado.gov.co/busquedas/buscador-jurisprudencia/",
+        "google_general": _google_general(termino_google),
+    }
 
 
-def _verificar_consejo_estado(referencia: str, sesion: requests.Session) -> _R:
+def _enlaces_norma(referencia: str, subtipo: str) -> dict:
     """
-    Verifica providencias del Consejo de Estado en SUIN via Bing.
-    Fallback: buscador del propio Consejo de Estado.
+    Genera enlaces para normas legales.
+    Ejemplo: Ley 1581 de 2012, Decreto 1377 de 2013
     """
-    FUENTE_SUIN = "SUIN-Juriscol · Consejo de Estado"
+    termino_suin   = referencia
+    termino_google = f'"{referencia}" Colombia site:suin-juriscol.gov.co OR site:funcionpublica.gov.co'
 
-    variantes = _normalizar_radicado_ce(referencia)
+    # Extraer número y año para el gestor de Función Pública
+    numero = re.search(r"\d+", referencia)
+    anio   = re.search(r"(?:19|20)\d{2}", referencia)
+    url_fp = "https://www.funcionpublica.gov.co/eva/gestornormativo/norma_busqueda.php"
+    if numero and anio:
+        url_fp += f"?norma={numero.group()}&anio={anio.group()}"
 
-    for i, termino in enumerate(variantes):
-        if i > 0:
-            time.sleep(DELAY)
-        url = _buscar_bing_suin(termino, sesion)
-        if url:
-            return "encontrada", FUENTE_SUIN, url
-
-    time.sleep(DELAY)
-    url = _buscar_bing_suin_sin_comillas(variantes[0], sesion)
-    if url:
-        return "encontrada", FUENTE_SUIN, url
-
-    url_manual = (
-        f"https://www.bing.com/search?q="
-        f"{quote_plus('site:suin-juriscol.gov.co ' + variantes[0])}"
-    )
-    return "no_encontrada", FUENTE_SUIN, url_manual
+    return {
+        "suin_google":      _google_suin(termino_suin),
+        "suin_bing":        _bing_suin(termino_suin),
+        "funcion_publica":  url_fp,
+        "google_general":   _google_general(termino_google),
+    }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NORMAS — SUIN + Función Pública
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _verificar_suin_norma(referencia: str, subtipo: str, sesion: requests.Session) -> _R:
-    """
-    Verifica normas legales.
-    Busca en SUIN via Bing: site:suin-juriscol.gov.co "Ley 1234 de 2020"
-    Fallback: Gestor Normativo de Función Pública.
-    """
-    FUENTE = "SUIN-Juriscol (normas)"
-    URL_NORM = f"{BASE_SUIN}/legislacion/buscador.html"
-
-    # Capa 1: Bing con referencia completa
-    url = _buscar_bing_suin(referencia, sesion)
-    if url:
-        return "encontrada", FUENTE, url
-
-    # Capa 2: Bing sin comillas
-    time.sleep(DELAY)
-    url = _buscar_bing_suin_sin_comillas(referencia, sesion)
-    if url:
-        return "encontrada", FUENTE, url
-
-    # Capa 3: buscador normativo de SUIN por GET (funciona para normas)
-    try:
-        numero = re.search(r"\d+", referencia)
-        anio   = re.search(r"(?:19|20)\d{2}", referencia)
-        if numero:
-            params = {
-                "numero": numero.group(),
-                "anio":   anio.group() if anio else "",
-                "tipo":   subtipo,
-            }
-            resp = sesion.get(URL_NORM, params=params, timeout=TIMEOUT, verify=False)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "lxml")
-                enlaces = soup.find_all(
-                    "a", href=re.compile(r"viewDocument\.asp\?id=\d+", re.IGNORECASE)
-                )
-                if enlaces:
-                    href = enlaces[0]["href"]
-                    full = href if href.startswith("http") else f"{BASE_SUIN}/{href.lstrip('/')}"
-                    return "encontrada", FUENTE, full
-    except Exception:
-        pass
-
-    url_manual = (
-        f"https://www.bing.com/search?q="
-        f"{quote_plus('site:suin-juriscol.gov.co ' + referencia)}"
-    )
-    return "no_encontrada", FUENTE, url_manual
-
-
-def _verificar_funcion_publica(referencia: str, sesion: requests.Session) -> _R:
-    """Fallback de normas: Gestor Normativo de Función Pública."""
-    URL    = "https://www.funcionpublica.gov.co/eva/gestornormativo/norma_busqueda.php"
-    FUENTE = "Gestor Normativo - Función Pública"
-    try:
-        numero = re.search(r"\d+", referencia)
-        anio   = re.search(r"(?:19|20)\d{2}", referencia)
-        params = {
-            "norma": numero.group() if numero else referencia,
-            "anio":  anio.group() if anio else "",
-        }
-        resp = sesion.get(URL, params=params, timeout=TIMEOUT)
-        if resp.status_code == 200 and "norma" in resp.text.lower():
-            soup = BeautifulSoup(resp.text, "lxml")
-            for a in soup.find_all("a", href=re.compile(r"norma\.php\?i=")):
-                href = a["href"]
-                full = f"https://www.funcionpublica.gov.co{href}" if href.startswith("/") else href
-                return "encontrada", FUENTE, full
-        return "no_encontrada", FUENTE, URL
-    except requests.exceptions.Timeout:
-        return "no_verificable", f"{FUENTE} (timeout)", URL
-    except requests.exceptions.ConnectionError:
-        return "no_verificable", f"{FUENTE} (sin conexión)", URL
-    except Exception:
-        return "no_verificable", f"{FUENTE} (error)", URL
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DOCTRINA
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _verificar_isbn(referencia: str, sesion: requests.Session) -> _R:
-    try:
+def _enlaces_doctrina(referencia: str, subtipo: str) -> dict:
+    """Genera enlaces para doctrina (ISBN, DOI, revistas)."""
+    if subtipo == "ISBN":
         isbn = re.sub(r"[\s\-–]", "", referencia)
-        r    = sesion.get(f"https://openlibrary.org/isbn/{isbn}.json", timeout=TIMEOUT)
-        if r.status_code == 200:
-            return "encontrada", "Open Library (ISBN)", f"https://openlibrary.org/isbn/{isbn}"
-        return "no_encontrada", "Open Library (ISBN)", "https://openlibrary.org"
-    except Exception:
-        return "no_verificable", "Open Library (error)", ""
-
-
-def _verificar_doi(referencia: str, sesion: requests.Session) -> _R:
-    try:
-        url = f"https://doi.org/{referencia}"
-        r   = sesion.head(url, timeout=TIMEOUT, allow_redirects=True)
-        if r.status_code in (200, 301, 302, 303):
-            return "encontrada", "doi.org", url
-        return "no_encontrada", "doi.org", url
-    except Exception:
-        return "no_verificable", "doi.org (error)", ""
+        return {
+            "open_library": f"https://openlibrary.org/isbn/{isbn}",
+            "google_books": f"https://www.google.com/search?q={quote_plus('ISBN ' + isbn)}",
+            "suin_google":  _google_suin(referencia),
+        }
+    elif subtipo == "DOI":
+        return {
+            "doi_org":      f"https://doi.org/{referencia}",
+            "google_scholar": _google_scholar(referencia),
+        }
+    else:
+        return {
+            "google_scholar": _google_scholar(referencia),
+            "suin_google":    _google_suin(referencia),
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DISPATCHER PRINCIPAL
+# FORMATEAR FUENTE Y ENLACE PRINCIPAL PARA LA TABLA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def verificar_cita(cita: Cita, fuentes_activas: dict, sesion: requests.Session) -> Cita:
-    """
-    Verifica una cita y actualiza estado/fuente/enlace.
-    Los enlaces generados son siempre URLs directas funcionales:
-      - viewDocument.asp?id=XXXXX  (resultado exitoso en SUIN)
-      - URL de relatoría de la corte  (fallback)
-      - URL de búsqueda en Bing  (cuando no se encuentra)
-    """
-    estado, fuente, enlace = "no_verificable", "", ""
+_ETIQUETAS = {
+    # corte_constitucional
+    "suin_google":    "🔍 Buscar en SUIN (Google)",
+    "suin_bing":      "🔍 Buscar en SUIN (Bing)",
+    "suin_num":       "🔍 Buscar en SUIN (radicado)",
+    "relatoria_cc":   "⚖️ Relatoría CC",
+    "relatoria_csj":  "🏛️ Relatoría CSJ",
+    "buscador_ce":    "🏢 Buscador CE",
+    "funcion_publica":"📋 Función Pública",
+    "open_library":   "📚 Open Library",
+    "google_books":   "📚 Google Books",
+    "doi_org":        "📄 doi.org",
+    "google_general": "🌐 Buscar en Google",
+    "google_scholar": "🎓 Google Scholar",
+}
 
-    if cita.tipo == "norma":
-        if fuentes_activas.get("suin", True):
-            estado, fuente, enlace = _verificar_suin_norma(
-                cita.referencia, cita.subtipo, sesion
-            )
-        if estado != "encontrada" and fuentes_activas.get("funcion_publica", True):
-            time.sleep(DELAY)
-            estado, fuente, enlace = _verificar_funcion_publica(cita.referencia, sesion)
 
-    elif cita.tipo == "corte_constitucional":
-        if fuentes_activas.get("corte_constitucional", True):
-            estado, fuente, enlace = _verificar_corte_constitucional(
-                cita.referencia, sesion
-            )
+def _formatear(enlaces: dict) -> tuple[str, str]:
+    """
+    Devuelve (enlace_principal, descripcion_fuentes).
+
+    enlace_principal → URL del primer enlace SUIN disponible (para la columna Enlace).
+    descripcion_fuentes → texto con todos los enlaces, separados por " | ".
+    """
+    # Enlace principal: siempre el de SUIN via Google
+    principal = enlaces.get("suin_google") or next(iter(enlaces.values()))
+
+    # Descripción con todos los enlaces no nulos
+    partes = []
+    for clave, url in enlaces.items():
+        if url:
+            etiqueta = _ETIQUETAS.get(clave, clave)
+            partes.append(f"{etiqueta}: {url}")
+
+    descripcion = " | ".join(partes)
+    return principal, descripcion
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN PÚBLICA: verificar_cita
+# ─────────────────────────────────────────────────────────────────────────────
+
+def verificar_cita(cita: Cita, fuentes_activas: dict = None, sesion=None) -> Cita:
+    """
+    Genera los enlaces de búsqueda manual para una cita.
+
+    No realiza peticiones HTTP. Todos los enlaces son URLs funcionales
+    que el usuario puede abrir directamente en su navegador.
+
+    Estado resultante: "generado" (distingue de verificación automática).
+    """
+    if cita.tipo == "corte_constitucional":
+        enlaces = _enlaces_corte_constitucional(cita.referencia)
 
     elif cita.tipo == "corte_suprema":
-        if fuentes_activas.get("corte_suprema", True):
-            estado, fuente, enlace = _verificar_corte_suprema(cita.referencia, sesion)
+        enlaces = _enlaces_corte_suprema(cita.referencia)
 
     elif cita.tipo == "consejo_estado":
-        if fuentes_activas.get("consejo_estado", True):
-            estado, fuente, enlace = _verificar_consejo_estado(cita.referencia, sesion)
+        enlaces = _enlaces_consejo_estado(cita.referencia)
+
+    elif cita.tipo == "norma":
+        enlaces = _enlaces_norma(cita.referencia, cita.subtipo)
 
     elif cita.tipo == "doctrina":
-        if cita.subtipo == "ISBN":
-            estado, fuente, enlace = _verificar_isbn(cita.referencia, sesion)
-        elif cita.subtipo == "DOI":
-            estado, fuente, enlace = _verificar_doi(cita.referencia, sesion)
-        else:
-            estado  = "no_verificable"
-            fuente  = "Sin fuente automatizable"
-            enlace  = ""
+        enlaces = _enlaces_doctrina(cita.referencia, cita.subtipo)
 
-    cita.estado = estado
-    cita.fuente = fuente
-    cita.enlace = enlace
+    else:
+        enlaces = {"google_general": _google_general(cita.referencia)}
 
-    time.sleep(DELAY)
+    enlace_principal, descripcion_fuentes = _formatear(enlaces)
+
+    cita.estado = "generado"
+    cita.enlace = enlace_principal
+    cita.fuente = descripcion_fuentes
+
     return cita
 
 
-def verificar_todas(citas: list, fuentes_activas: dict, callback_progreso=None) -> list:
-    """Verifica todas las citas en secuencia."""
-    sesion = _crear_sesion()
-    total  = len(citas)
+def verificar_todas(
+    citas: list,
+    fuentes_activas: dict = None,
+    callback_progreso=None,
+) -> list:
+    """
+    Genera enlaces de búsqueda para todas las citas.
+    Proceso instantáneo — sin peticiones HTTP.
+    """
+    total = len(citas)
     for i, cita in enumerate(citas):
         if callback_progreso:
             callback_progreso(i, total, cita)
-        verificar_cita(cita, fuentes_activas, sesion)
+        verificar_cita(cita, fuentes_activas)
     return citas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Compatibilidad: _crear_sesion (requerida por app.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _crear_sesion():
+    """Stub de compatibilidad — no se usa ninguna sesión HTTP."""
+    return None
