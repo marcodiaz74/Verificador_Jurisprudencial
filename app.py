@@ -412,14 +412,24 @@ with tab_verificacion:
                         f"🔍 Consultando: **{cita.referencia}** en {cita.tipo.replace('_', ' ')}"
                     )
 
+                error_verificacion = None
                 try:
                     verificar_todas(citas, fuentes_activas, callback_progreso=actualizar_progreso)
-                    barra.progress(1.0, text="✅ Verificación completada")
-                    contenedor_estado.empty()
-                    st.session_state.citas_verificadas = True
-                    st.rerun()
                 except Exception as e:
-                    st.error(f"Error durante la verificación: {str(e)}")
+                    error_verificacion = str(e)
+
+                # Persistir estado ANTES del rerun — evita pérdida de estado en conexiones lentas
+                barra.progress(1.0, text="✅ Verificación completada")
+                contenedor_estado.empty()
+                st.session_state.citas_verificadas = True
+                st.session_state.citas = citas  # forzar persistencia de los estados actualizados
+
+                if error_verificacion:
+                    st.warning(
+                        f"⚠️ La verificación terminó con errores parciales: {error_verificacion}. "
+                        "Las citas afectadas quedaron como 'No verificable'."
+                    )
+                st.rerun()
 
         # Resultados
         if st.session_state.citas_verificadas:
@@ -455,7 +465,7 @@ with tab_verificacion:
                 return ""
 
             st.dataframe(
-                df_mostrar.style.applymap(colorear_estado, subset=["Estado"]),
+                df_mostrar.style.map(colorear_estado, subset=["Estado"]),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -476,9 +486,14 @@ with tab_verificacion:
 # ═══════════════════════════════════════════════════════════════════════
 
 with tab_reporte:
+    # Determinar si hay citas con algún estado ya procesado (encontrada, no_encontrada, no_verificable)
+    citas_procesadas = [
+        c for c in st.session_state.citas
+        if c.estado in ("encontrada", "no_encontrada", "no_verificable")
+    ]
     if not st.session_state.citas:
         st.info("Cargue y analice un documento para generar el reporte.")
-    elif not st.session_state.citas_verificadas:
+    elif not st.session_state.citas_verificadas and not citas_procesadas:
         st.info("Complete la verificación en la pestaña **✅ Verificación** para generar el reporte.")
     else:
         citas = st.session_state.citas
@@ -564,7 +579,7 @@ with tab_reporte:
             return ""
 
         st.dataframe(
-            df_final.style.applymap(colorear_estado, subset=["Estado"]),
+            df_final.style.map(colorear_estado, subset=["Estado"]),
             use_container_width=True,
             hide_index=True,
             column_config={
