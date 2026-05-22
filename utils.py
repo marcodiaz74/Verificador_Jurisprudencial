@@ -112,7 +112,7 @@ def exportar_excel(citas: list[Cita], nombre_documento: str = "") -> bytes:
     """
     import openpyxl
     from openpyxl.styles import (
-        PatternFill, Font, Alignment, Border, Side, numbers
+        PatternFill, Font, Alignment, Border, Side
     )
     from openpyxl.utils import get_column_letter
 
@@ -279,7 +279,9 @@ def calcular_estadisticas(citas: list[Cita]) -> dict:
         if tipo not in por_tipo:
             por_tipo[tipo] = {"total": 0, "encontradas": 0, "no_encontradas": 0, "no_verificables": 0}
         por_tipo[tipo]["total"] += 1
-        por_tipo[tipo][cita.estado.replace("-", "_")] = por_tipo[tipo].get(cita.estado, 0) + 1
+        clave_estado = cita.estado.replace("-", "_")
+        if clave_estado in por_tipo[tipo]:
+            por_tipo[tipo][clave_estado] += 1
 
     return {
         "total": total,
