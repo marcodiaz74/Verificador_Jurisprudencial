@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 
 from anonimizador import anonimizar_texto, generar_advertencia_habeas_data, resumen_anonimizacion
-from extractor import extraer_citas, agrupar_por_tipo, ETIQUETAS_TIPO
+from extractor import extraer_citas, agrupar_por_tipo, ETIQUETAS_TIPO, Cita
 from verificador import verificar_cita, verificar_todas
 from utils import (
     extraer_texto, limpiar_texto, exportar_excel,
@@ -241,7 +241,6 @@ with tab3:
 
         # ── Proceso de generación (instantáneo, sin red) ──────────────────────
         if generar:
-            from extractor import Cita
             barra = st.progress(0, text="Generando enlaces…")
             total = len(st.session_state.citas_dicts)
 
@@ -347,9 +346,8 @@ with tab4:
     elif not con_enlaces:
         st.info("Genere los enlaces en **🔗 Enlaces de verificación** para activar el reporte.")
     else:
-        from extractor import Cita as C
         citas_obj = [
-            C(tipo=d["tipo"], subtipo=d["subtipo"],
+            Cita(tipo=d["tipo"], subtipo=d["subtipo"],
               texto_original=d["texto_original"], referencia=d["referencia"],
               estado=d["estado"], fuente=d["fuente"], enlace=d["enlace"])
             for d in citas_dicts
@@ -391,15 +389,12 @@ with tab4:
 
         # Descarga Excel
         try:
-            # Para exportar, adaptar estados "generado" → "no_verificable" en Excel
-            # (para que la lógica de colores de exportar_excel funcione)
-            from extractor import Cita as CE
             citas_export = [
-                CE(tipo=d["tipo"], subtipo=d["subtipo"],
-                   texto_original=d["texto_original"], referencia=d["referencia"],
-                   estado="no_verificable",   # color neutro en Excel
-                   fuente="Ver enlaces en la app",
-                   enlace=d["enlace"])
+                Cita(tipo=d["tipo"], subtipo=d["subtipo"],
+                     texto_original=d["texto_original"], referencia=d["referencia"],
+                     estado="no_verificable",
+                     fuente="Ver enlaces en la app",
+                     enlace=d["enlace"])
                 for d in citas_dicts
             ]
             bytes_xl = exportar_excel(citas_export, st.session_state.nombre_archivo)
